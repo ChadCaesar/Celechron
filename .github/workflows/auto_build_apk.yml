@@ -28,7 +28,7 @@ jobs:
       # 1. Checkout 自己的 Fork
       # ------------------------------------------------------------
       - name: Checkout fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -105,7 +105,7 @@ jobs:
       # ------------------------------------------------------------
       - name: Set up Java
         if: steps.check.outputs.build == 'true'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -170,7 +170,7 @@ jobs:
           UPSTREAM_SHA: ${{ steps.release.outputs.sha }}
         run: |
           VERSION="$(awk '/^version:/ {print $2; exit}' pubspec.yaml)"
-          VERSION="${VERSION//+/-}"
+          VERSION="${VERSION%%+*}"
 
           APK_NAME="Celechron-${VERSION}.apk"
 
@@ -186,7 +186,7 @@ jobs:
       # ------------------------------------------------------------
       - name: Upload APK artifact
         if: steps.check.outputs.build == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Celechron-${{ steps.release.outputs.tag }}-APK
           path: ${{ steps.apk.outputs.path }}
