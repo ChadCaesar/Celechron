@@ -1,0 +1,222 @@
+name: Build Celechron APK
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # 每周检查一次
+    - cron: "0 9 * * 1"
+      timezone: "Asia/Shanghai"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: celechron-auto-build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: Celechron/Celechron
+  UPSTREAM_BRANCH: main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Checkout 自己的 Fork
+      # ------------------------------------------------------------
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------
+      # 2. 获取上游源码
+      # ------------------------------------------------------------
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || true
+          git fetch upstream "${UPSTREAM_BRANCH}" --tags
+
+      # ------------------------------------------------------------
+      # 3. 同步自己的 main
+      # ------------------------------------------------------------
+      - name: Sync upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout main
+          git merge --no-edit "upstream/${UPSTREAM_BRANCH}"
+          git push origin main
+
+      # ------------------------------------------------------------
+      # 4. 获取上游最新 Release
+      # ------------------------------------------------------------
+      - name: Get latest upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
+          SHA="$(git rev-list -n 1 "$TAG")"
+
+          SAFE_TAG="$(echo "$TAG" | tr '/ ' '--')"
+          RELEASE_TAG="apk-${SAFE_TAG}"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+          echo "Upstream release: $TAG"
+          echo "Commit: $SHA"
+
+      # ------------------------------------------------------------
+      # 5. 判断是否已经构建
+      # ------------------------------------------------------------
+      - name: Check whether APK already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+
+            echo "APK already built."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New release detected."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ------------------------------------------------------------
+      # 6. 切换到官方 Release 对应源码
+      # ------------------------------------------------------------
+      - name: Checkout upstream release
+        if: steps.check.outputs.build == 'true'
+        run: |
+          git checkout --detach "${{ steps.release.outputs.sha }}"
+
+      # ------------------------------------------------------------
+      # 7. 设置 JDK
+      # ------------------------------------------------------------
+      - name: Set up Java
+        if: steps.check.outputs.build == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      # ------------------------------------------------------------
+      # 8. 设置 Flutter
+      # ------------------------------------------------------------
+      - name: Set up Flutter
+        if: steps.check.outputs.build == 'true'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        if: steps.check.outputs.build == 'true'
+        run: flutter --version
+
+      # ------------------------------------------------------------
+      # 9. 从 GitHub Secret 恢复固定签名
+      # ------------------------------------------------------------
+      - name: Restore Android signing key
+        if: steps.check.outputs.build == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "ANDROID_DEBUG_KEYSTORE_B64 is missing."
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.android"
+
+          printf '%s' "$KEYSTORE_B64" \
+            | base64 --decode \
+            > "$HOME/.android/debug.keystore"
+
+          chmod 600 "$HOME/.android/debug.keystore"
+
+      # ------------------------------------------------------------
+      # 10. 安装 Flutter 依赖
+      # ------------------------------------------------------------
+      - name: Install dependencies
+        if: steps.check.outputs.build == 'true'
+        run: flutter pub get
+
+      # ------------------------------------------------------------
+      # 11. 构建 Release APK
+      # ------------------------------------------------------------
+      - name: Build APK
+        if: steps.check.outputs.build == 'true'
+        run: flutter build apk --release
+
+      # ------------------------------------------------------------
+      # 12. 给 APK 一个更清楚的文件名
+      # ------------------------------------------------------------
+      - name: Prepare APK
+        if: steps.check.outputs.build == 'true'
+        id: apk
+        env:
+          UPSTREAM_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          VERSION="$(awk '/^version:/ {print $2; exit}' pubspec.yaml)"
+          VERSION="${VERSION//+/-}"
+
+          APK_NAME="Celechron-${VERSION}.apk"
+
+          cp \
+            build/app/outputs/flutter-apk/app-release.apk \
+            "$APK_NAME"
+
+          echo "path=$APK_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------
+      # 13. 保存一份 Actions Artifact
+      # ------------------------------------------------------------
+      - name: Upload APK artifact
+        if: steps.check.outputs.build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Celechron-${{ steps.release.outputs.tag }}-APK
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 30
+
+      # ------------------------------------------------------------
+      # 14. 创建自己的 GitHub Release
+      # ------------------------------------------------------------
+      - name: Create GitHub Release
+        if: steps.check.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          UPSTREAM_TAG: ${{ steps.release.outputs.tag }}
+          UPSTREAM_SHA: ${{ steps.release.outputs.sha }}
+          APK_PATH: ${{ steps.apk.outputs.path }}
+        run: |
+          cat > release_notes.md << EOF
+          Automated APK build of Celechron.
+
+          Upstream repository: Celechron/Celechron
+          Upstream release: ${UPSTREAM_TAG}
+          Upstream commit: ${UPSTREAM_SHA}
+
+          This APK was automatically built from the official upstream release source code.
+          EOF
+
+          gh release create "$RELEASE_TAG" \
+            "$APK_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$UPSTREAM_SHA" \
+            --title "Celechron ${UPSTREAM_TAG} APK" \
+            --notes-file release_notes.md
