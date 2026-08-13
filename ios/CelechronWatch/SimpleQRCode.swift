@@ -2,15 +2,20 @@
 //  SimpleQRCode.swift
 //  CelechronWatch
 //
-//  watchOS 纯 Swift 二维码（Version 1–2，Byte 模式，纠错 M）。
+//  watchOS 纯 Swift 二维码（Version 1–3，Byte 模式，纠错 M）。
 //
 
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 enum SimpleQRCode {
+    static let maximumPayloadByteCount = 42
+
+    #if canImport(UIKit)
     static func image(from text: String, size: CGFloat) -> UIImage? {
-        guard let modules = encode(text) else { return nil }
+        guard let modules = matrix(from: text) else { return nil }
         let n = modules.count
         let scale = max(1, Int(floor(size / CGFloat(n))))
         let px = n * scale
@@ -44,30 +49,27 @@ enum SimpleQRCode {
         guard let cgImage = ctx.makeImage() else { return nil }
         return UIImage(cgImage: cgImage)
     }
+    #endif
 
     // MARK: - Encode
 
-    private static func encode(_ text: String) -> [[Bool]]? {
+    /// 返回包含 1-module quiet zone 的二维码矩阵。
+    ///
+    /// 目前固定使用 Byte mode、ECC M 和 mask 0；超出 Version 3 容量时失败，
+    /// 绝不截断付款码。internal 可见性用于独立回归测试。
+    static func matrix(from text: String) -> [[Bool]]? {
         let bytes = Array(text.utf8)
-        // Version 1 (M): 14 data bytes; Version 2 (M): 26 data bytes
-        let version: Int
-        if bytes.count <= 14 {
-            version = 1
-        } else if bytes.count <= 26 {
-            version = 2
-        } else {
-            // 过长则截断到 26 字节
-            return encode(String(text.prefix(26)))
-        }
+        guard let version = version(forByteCount: bytes.count) else { return nil }
 
         let size = 17 + 4 * version
-        // Total codewords / EC codewords for ECC=M
-        let (totalCW, ecCW): (Int, Int) = version == 1 ? (26, 10) : (44, 16)
-        // Wait - ISO tables for M:
-        // V1 M: total 26 codewords, 10 EC → 16 data
-        // V2 M: total 44 codewords, 16 EC → 28 data
-        // Capacity bytes for byte mode ≈ data codewords - mode/count overhead
-        let dataCW = totalCW - ecCW // 16 or 28
+        // ISO/IEC 18004 block table for ECC M. Versions 1–3 each contain one RS block.
+        let (totalCW, dataCW): (Int, Int)
+        switch version {
+        case 1: (totalCW, dataCW) = (26, 16)
+        case 2: (totalCW, dataCW) = (44, 28)
+        default: (totalCW, dataCW) = (70, 44)
+        }
+        let ecCW = totalCW - dataCW
 
         var bits: [Bool] = []
         bits += bitsOf(0b0100, length: 4) // Byte mode
@@ -117,15 +119,25 @@ enum SimpleQRCode {
         applyMask(&modules, reserved: reserved, mask: maskID, size: size)
         drawFormatBits(&modules, mask: maskID, size: size)
 
-        // Quiet zone (1 module)
-        let q = size + 2
+        // Apple Watch 屏幕空间有限，保留一格静区并由外层白色容器补充留白。
+        let quietZone = 1
+        let q = size + quietZone * 2
         var out = Array(repeating: Array(repeating: false, count: q), count: q)
         for y in 0 ..< size {
             for x in 0 ..< size {
-                out[y + 1][x + 1] = modules[y][x]
+                out[y + quietZone][x + quietZone] = modules[y][x]
             }
         }
         return out
+    }
+
+    private static func version(forByteCount byteCount: Int) -> Int? {
+        switch byteCount {
+        case 0 ... 14: 1
+        case 15 ... 26: 2
+        case 27 ... maximumPayloadByteCount: 3
+        default: nil
+        }
     }
 
     private static func bitsOf(_ value: Int, length: Int) -> [Bool] {
@@ -202,8 +214,7 @@ enum SimpleQRCode {
     private static func drawAlignment(
         _ m: inout [[Bool]], _ r: inout [[Bool]], size: Int
     ) {
-        // Version 2 alignment center = 6? Actually centers: [6, 18] for v2, but avoid finder overlap.
-        // Only place at (18,18) for 25x25.
+        // Versions 2 and 3 have one non-finder alignment pattern at (size - 7, size - 7).
         let c = size - 7
         for dy in -2 ... 2 {
             for dx in -2 ... 2 {
@@ -220,7 +231,13 @@ enum SimpleQRCode {
         for i in 0 ... 8 {
             r[8][i] = true
             r[i][8] = true
+        }
+        // The top-right copy occupies eight modules; the bottom-left copy occupies seven.
+        // The eighth vertical module is the fixed dark module reserved by drawDarkModule().
+        for i in 0 ..< 8 {
             r[8][size - 1 - i] = true
+        }
+        for i in 0 ..< 7 {
             r[size - 1 - i][8] = true
         }
     }
@@ -293,10 +310,10 @@ enum SimpleQRCode {
         }
         // Other copy
         let map2: [(Int, Int)] = [
-            (size - 1, 8), (size - 2, 8), (size - 3, 8), (size - 4, 8),
-            (size - 5, 8), (size - 6, 8), (size - 7, 8),
-            (8, size - 8), (8, size - 7), (8, size - 6), (8, size - 5),
-            (8, size - 4), (8, size - 3), (8, size - 2), (8, size - 1),
+            (8, size - 1), (8, size - 2), (8, size - 3), (8, size - 4),
+            (8, size - 5), (8, size - 6), (8, size - 7),
+            (size - 8, 8), (size - 7, 8), (size - 6, 8), (size - 5, 8),
+            (size - 4, 8), (size - 3, 8), (size - 2, 8), (size - 1, 8),
         ]
         for (i, p) in map2.enumerated() {
             m[p.1][p.0] = bit(i)
