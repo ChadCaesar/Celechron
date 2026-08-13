@@ -98,6 +98,7 @@ bool jsonIndicatesAuthenticationFailure(Map<String, dynamic> json) {
       message.contains('kickout');
   final failed = code == HttpStatus.unauthorized ||
       code == HttpStatus.forbidden ||
+      code == 901 ||
       (authenticationMessage &&
           (success == false || (code != null && code != HttpStatus.ok)));
   if (failed) return true;
