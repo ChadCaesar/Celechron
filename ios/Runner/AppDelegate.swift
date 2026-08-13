@@ -59,11 +59,40 @@ private class FlowMessengerImplementation: FlowMessenger {
 
         // ECard widget MethodChannel
         let ecardWidgetChannel = FlutterMethodChannel(name: "top.celechron.celechron/ecardWidget", binaryMessenger: engineBridge.applicationRegistrar.messenger())
+        WatchConnectivityBridge.shared.credentialRefreshHandler = { completion in
+            DispatchQueue.main.async {
+                ecardWidgetChannel.invokeMethod("refreshCredential", arguments: nil) { value in
+                    let success = (value as? Bool) == true
+                    if success {
+                        if #available(iOS 14.0, *) {
+                            WidgetCenter.shared.reloadTimelines(ofKind: "ECardWidget")
+                        }
+                    }
+                    completion(success)
+                }
+            }
+        }
         ecardWidgetChannel.setMethodCallHandler({
           (call: FlutterMethodCall, result: @escaping FlutterResult) -> Void in
+            guard call.method == "update" || call.method == "logout" else {
+                result(FlutterMethodNotImplemented)
+                return
+            }
+            if call.method == "logout" {
+                WatchConnectivityBridge.shared.revokeWatchCredential()
+                if #available(iOS 14.0, *) {
+                    WidgetCenter.shared.reloadTimelines(ofKind: "ECardWidget")
+                }
+                result(nil)
+                return
+            }
+
             if #available(iOS 14.0, *) {
                 WidgetCenter.shared.reloadTimelines(ofKind: "ECardWidget")
             }
+            // The Dart side writes auth/account before invoking this method, so
+            // credentials can be provisioned immediately without waiting for the widget.
+            WatchConnectivityBridge.shared.syncCredentialToWatch()
             // 小组件刷新后会写入余额缓存；稍后再同步到手表
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 WatchConnectivityBridge.shared.syncFromAppGroup()

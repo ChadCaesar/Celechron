@@ -22,6 +22,9 @@ import 'package:celechron/database/database_helper.dart';
 import 'package:celechron/utils/global.dart';
 
 void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  ECardWidgetMessenger.installNativeHandler();
+
   // 尽可能早地声明前台活跃，Workmanager isolate 会据此安全让行。
   await RefreshCoordinator.setForegroundActive(true);
 

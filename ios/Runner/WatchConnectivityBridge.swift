@@ -13,6 +13,13 @@ final class WatchConnectivityBridge: NSObject, WCSessionDelegate {
     static let shared = WatchConnectivityBridge()
 
     private let testAccount = "3200000000"
+    private let ecardService = ECardService()
+    private let revisionLock = NSLock()
+    private var lastCredentialRevision: Int64 = 0
+
+    /// Installed by AppDelegate after the Flutter engine is ready. The Dart
+    /// implementation reuses ECardWidgetMessenger's existing CAS refresh path.
+    var credentialRefreshHandler: ((@escaping (Bool) -> Void) -> Void)?
 
     private override init() {
         super.init()
@@ -52,6 +59,11 @@ final class WatchConnectivityBridge: NSObject, WCSessionDelegate {
 
         guard !payload.isEmpty else { return }
         push(payload: payload)
+        if loggedIn {
+            pushCredentialIfReachable()
+        } else {
+            sendCredentialRevocationIfReachable()
+        }
     }
 
     /// 同步日程 JSON（与 App Group 中 flowList 一致）
@@ -71,6 +83,21 @@ final class WatchConnectivityBridge: NSObject, WCSessionDelegate {
             "ecardUpdateTime": updatedAt.timeIntervalSince1970,
             "ecardLoggedIn": loggedIn,
         ])
+        if loggedIn {
+            pushCredentialIfReachable()
+        }
+    }
+
+    /// Called after ECardWidgetMessenger has refreshed the iPhone Keychain.
+    func syncCredentialToWatch() {
+        syncFromAppGroup()
+    }
+
+    /// Revocation contains no secret, so the normal reliable context path is
+    /// safe. Watch also deletes the Keychain item when ecardLoggedIn becomes false.
+    func revokeWatchCredential() {
+        push(payload: ["ecardLoggedIn": false])
+        sendCredentialRevocationIfReachable()
     }
 
     private func push(payload: [String: Any]) {
@@ -146,121 +173,155 @@ final class WatchConnectivityBridge: NSObject, WCSessionDelegate {
         return String(data: data, encoding: .utf8)
     }
 
+    private func writeECardAccount(_ value: String) {
+        #if DEBUG
+        let accessGroup = "group.top.celechron.celechron.debug"
+        #else
+        let accessGroup = "group.top.celechron.celechron"
+        #endif
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrAccount: "eCardAccount",
+            kSecAttrAccessGroup: accessGroup,
+            kSecAttrService: "Celechron",
+            kSecAttrSynchronizable: false,
+        ]
+        let data = Data(value.utf8)
+        let attributes: [CFString: Any] = [
+            kSecValueData: data,
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlock,
+        ]
+        if SecItemUpdate(query as CFDictionary, attributes as CFDictionary) == errSecItemNotFound {
+            var insert = query
+            attributes.forEach { insert[$0.key] = $0.value }
+            SecItemAdd(insert as CFDictionary, nil)
+        }
+    }
+
+    private func nextCredentialRevision() -> Int64 {
+        revisionLock.lock()
+        defer { revisionLock.unlock() }
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        lastCredentialRevision = max(now, lastCredentialRevision + 1)
+        return lastCredentialRevision
+    }
+
+    private func credentialPayload(auth: String, account: String?) -> [String: Any] {
+        var payload: [String: Any] = [
+            "auth": auth,
+            "revision": nextCredentialRevision(),
+        ]
+        if let account, !account.isEmpty {
+            payload["account"] = account
+        }
+        return payload
+    }
+
+    private func currentCredentialPayload() -> [String: Any]? {
+        guard let auth = readSynjonesAuth(), !auth.isEmpty, auth != testAccount else { return nil }
+        return credentialPayload(auth: auth, account: readECardAccount())
+    }
+
+    /// Credentials are intentionally sent only as a live message. They never
+    /// enter applicationContext or transferUserInfo, both of which persist data.
+    private func pushCredentialIfReachable() {
+        guard WCSession.isSupported(),
+              WCSession.default.activationState == .activated,
+              WCSession.default.isReachable,
+              let credential = currentCredentialPayload()
+        else {
+            return
+        }
+        WCSession.default.sendMessage(
+            [
+                "action": "provisionPayCredential",
+                "credential": credential,
+            ],
+            replyHandler: nil,
+            errorHandler: nil
+        )
+    }
+
+    private func sendCredentialRevocationIfReachable() {
+        guard WCSession.isSupported(),
+              WCSession.default.activationState == .activated,
+              WCSession.default.isReachable
+        else {
+            return
+        }
+        WCSession.default.sendMessage(
+            ["action": "revokePayCredential"],
+            replyHandler: nil,
+            errorHandler: nil
+        )
+    }
+
     /// 生成演示用随机数字码（与 Flutter 未登录路径一致）
     private func demoBarcode(length: Int = 16) -> String {
         (0 ..< length).map { _ in String(Int.random(in: 0 ... 9)) }.joined()
     }
 
-    /// 手表请求付款码：已登录则走校园卡接口，否则返回演示码
+    /// 手表回退请求：iPhone 使用与 ECardWidget 相同的服务和错误分类。
     private func fulfillPayCodeRequest(replyHandler: @escaping ([String: Any]) -> Void) {
         guard let auth = readSynjonesAuth(), auth != testAccount else {
             replyHandler([
                 "barcode": demoBarcode(),
                 "isDemo": true,
+                "loggedIn": false,
             ])
             return
         }
 
-        fetchBarcode(synjonesAuth: auth) { code in
-            if let code, !code.isEmpty {
+        ecardService.fetchPayCode(auth: auth, cachedAccount: readECardAccount()) { result in
+            switch result {
+            case let .success(payCode):
+                if payCode.account != self.readECardAccount() {
+                    self.writeECardAccount(payCode.account)
+                }
                 replyHandler([
-                    "barcode": code,
+                    "barcode": payCode.code,
                     "isDemo": false,
+                    "loggedIn": true,
+                    "credential": self.credentialPayload(auth: auth, account: payCode.account),
                 ])
-            } else {
+            case let .failure(error):
                 replyHandler([
-                    "barcode": self.demoBarcode(),
-                    "isDemo": true,
+                    "error": error.wireValue,
+                    "loggedIn": true,
+                    "retryable": error == .transientFailure,
+                    "needsRefresh": error == .authenticationExpired,
                 ])
             }
         }
     }
 
-    private func fetchBarcode(synjonesAuth: String, completion: @escaping (String?) -> Void) {
-        // 先尽量用缓存的 eCardAccount；没有则先拉卡列表
-        if let account = readECardAccount(), !account.isEmpty {
-            fetchBarcode(auth: synjonesAuth, account: account, completion: completion)
+    private func fulfillCredentialRequest(replyHandler: @escaping ([String: Any]) -> Void) {
+        guard let credential = currentCredentialPayload() else {
+            replyHandler(["loggedIn": false])
             return
         }
-        fetchAccount(auth: synjonesAuth) { account in
-            guard let account, !account.isEmpty else {
-                completion(nil)
-                return
-            }
-            self.fetchBarcode(auth: synjonesAuth, account: account, completion: completion)
-        }
+        replyHandler([
+            "loggedIn": true,
+            "credential": credential,
+        ])
     }
 
-    private func fetchAccount(auth: String, completion: @escaping (String?) -> Void) {
-        guard let url = URL(string: "https://elife.zju.edu.cn/berserker-app/ykt/tsm/getCampusCards") else {
-            completion(nil)
+    private func fulfillCredentialRefresh(replyHandler: @escaping ([String: Any]) -> Void) {
+        guard let handler = credentialRefreshHandler else {
+            replyHandler(["error": "refreshUnavailable", "retryable": false])
             return
         }
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.addValue("Bearer \(auth)", forHTTPHeaderField: "Synjones-Auth")
-        request.addValue(
-            "E-CampusZJU/2.3.20 (iPhone; iOS 17.5.1; Scale/3.00)",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.timeoutInterval = 10
-
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            guard error == nil, let data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let dataObj = json["data"] as? [String: Any],
-                  let cards = dataObj["card"] as? [[String: Any]], !cards.isEmpty
-            else {
-                completion(nil)
+        handler { success in
+            guard success, let credential = self.currentCredentialPayload() else {
+                replyHandler(["error": "refreshFailed", "retryable": false])
                 return
             }
-            // 选余额最高的卡
-            let sorted = cards.sorted {
-                ($0["db_balance"] as? Int ?? 0) > ($1["db_balance"] as? Int ?? 0)
-            }
-            let account = sorted.first?["account"] as? String
-            completion(account)
-        }.resume()
-    }
-
-    private func fetchBarcode(auth: String, account: String, completion: @escaping (String?) -> Void) {
-        let encoded = account.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? account
-        guard let url = URL(
-            string:
-            "https://elife.zju.edu.cn/berserker-app/ykt/tsm/batchGetBarCodeGet?account=\(encoded)&payacc=%23%23%23&paytype=1&synAccessSource=app"
-        ) else {
-            completion(nil)
-            return
+            replyHandler([
+                "loggedIn": true,
+                "credential": credential,
+            ])
+            self.pushCredentialIfReachable()
         }
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.addValue("bearer \(auth)", forHTTPHeaderField: "synjones-auth")
-        request.addValue(
-            "E-CampusZJU/2.3.20 (iPhone; iOS 17.5.1; Scale/3.00)",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.timeoutInterval = 10
-
-        URLSession.shared.dataTask(with: request) { data, _, error in
-            guard error == nil, let data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let dataObj = json["data"] as? [String: Any]
-            else {
-                completion(nil)
-                return
-            }
-            if let barcodes = dataObj["barcode"] as? [String], let first = barcodes.first, !first.isEmpty {
-                completion(first)
-                return
-            }
-            if let barcodes = dataObj["barcode"] as? [Any],
-               let first = barcodes.first as? String, !first.isEmpty
-            {
-                completion(first)
-                return
-            }
-            completion(nil)
-        }.resume()
     }
 
     // MARK: - WCSessionDelegate
@@ -275,6 +336,9 @@ final class WatchConnectivityBridge: NSObject, WCSessionDelegate {
             pending.removeAll()
             push(payload: copy)
         }
+        if activationState == .activated {
+            pushCredentialIfReachable()
+        }
     }
 
     #if os(iOS)
@@ -288,8 +352,20 @@ final class WatchConnectivityBridge: NSObject, WCSessionDelegate {
         didReceiveMessage message: [String: Any],
         replyHandler: @escaping ([String: Any]) -> Void
     ) {
-        if let action = message["action"] as? String, action == "requestPayCode" {
+        guard let action = message["action"] as? String else {
+            replyHandler(["ok": true])
+            return
+        }
+        if action == "requestPayCode" {
             fulfillPayCodeRequest(replyHandler: replyHandler)
+            return
+        }
+        if action == "requestPayCredential" {
+            fulfillCredentialRequest(replyHandler: replyHandler)
+            return
+        }
+        if action == "refreshPayCredential" {
+            fulfillCredentialRefresh(replyHandler: replyHandler)
             return
         }
         replyHandler(["ok": true])

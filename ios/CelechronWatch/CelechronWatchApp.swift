@@ -316,13 +316,27 @@ private struct FlowCard: View {
 
 // MARK: - ECard Pay Page (QR)
 
+private enum WatchPayCodeState: Equatable {
+    case connecting
+    case requesting
+    case real
+    case demo
+    case unavailable(String)
+}
+
 struct WatchECardPayPage: View {
+    private let ecardService = ECardService()
+    private let credentialStore = WatchECardCredentialStore.shared
+
     @State private var barcode = ""
     @State private var balanceText = "待刷新"
     @State private var qrImage: UIImage?
-    @State private var isDemo = true
-    @State private var isLoading = false
-    @State private var statusMessage = ""
+    @State private var codeState: WatchPayCodeState = .connecting
+    @State private var statusMessage = "正在准备付款码"
+    @State private var transientRetryCount = 0
+    @State private var credentialRefreshAttempted = false
+    @State private var phoneFallbackAttempted = false
+    @State private var requestSerial = 0
     @AccessibilityFocusState private var announceRefresh: Bool
 
     var body: some View {
@@ -341,16 +355,40 @@ struct WatchECardPayPage: View {
                                     .interpolation(.none)
                                     .resizable()
                                     .scaledToFit()
+                            } else if let unavailableMessage {
+                                VStack(spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle")
+                                        .font(.title3)
+                                    Text(unavailableMessage)
+                                        .font(.caption2)
+                                        .multilineTextAlignment(.center)
+                                        .minimumScaleFactor(0.75)
+                                }
+                                .foregroundStyle(.red)
+                                .padding(8)
                             } else {
-                                ProgressView()
+                                VStack(spacing: 6) {
+                                    ProgressView()
+                                    Text(statusMessage)
+                                        .font(.caption2)
+                                        .multilineTextAlignment(.center)
+                                        .minimumScaleFactor(0.75)
+                                }
+                                .foregroundStyle(.gray)
+                                .padding(8)
                             }
                         }
                         .frame(width: side, height: side)
                         .padding(3)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: 8))
-                        .opacity(isDemo ? 0.92 : 1)
+                        .background {
+                            if qrImage != nil || unavailableMessage != nil {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(Color.white)
+                            }
+                        }
+                        .opacity(isShowingDemo ? 0.92 : 1)
 
-                        if isLoading {
+                        if isRequesting, qrImage != nil {
                             ProgressView()
                                 .tint(.secondary)
                         }
@@ -359,11 +397,11 @@ struct WatchECardPayPage: View {
                 .buttonStyle(.plain)
                 .frame(minWidth: side, minHeight: side)
                 .contentShape(Rectangle())
-                .accessibilityLabel(isDemo ? "演示付款码，点按刷新" : "校园卡付款码，点按刷新")
+                .accessibilityLabel(qrAccessibilityLabel)
                 .accessibilityHint("生成新的付款码")
-                .accessibilityValue(statusMessage.isEmpty ? (isDemo ? "演示码" : "真实码") : statusMessage)
+                .accessibilityValue(statusMessage)
 
-                if isDemo {
+                if isShowingDemo {
                     Text("演示码 · 请在 iPhone 登录")
                         .font(.caption2)
                         .foregroundStyle(.orange)
@@ -390,81 +428,282 @@ struct WatchECardPayPage: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: WatchDataSync.didUpdateNotification)) { _ in
             reloadBalance()
+            retryBarcodeIfReady()
+        }
+        .onDisappear {
+            // Invalidate pending callbacks and release the payment code/image.
+            requestSerial += 1
+            barcode = ""
+            qrImage = nil
         }
     }
 
     private func reloadBalance() {
         let defaults = WidgetAppGroup.defaults
         if defaults?.object(forKey: WidgetAppGroup.ecardBalanceKey) == nil {
-            balanceText = ECardBalanceFormatter.string(from: 1897)
+            balanceText = ECardBalanceFormatter.string(from: -1)
         } else {
             let balance = defaults?.integer(forKey: WidgetAppGroup.ecardBalanceKey) ?? -1
             balanceText = ECardBalanceFormatter.string(from: balance)
         }
     }
 
-    private var isLoggedIn: Bool {
-        WidgetAppGroup.defaults?.bool(forKey: WidgetAppGroup.ecardLoggedInKey) == true
+    private var isShowingDemo: Bool {
+        codeState == .demo
+    }
+
+    private var isRequesting: Bool {
+        codeState == .requesting
+    }
+
+    private var unavailableMessage: String? {
+        guard case let .unavailable(message) = codeState else { return nil }
+        return message
+    }
+
+    private var qrAccessibilityLabel: String {
+        switch codeState {
+        case .demo: return "演示付款码，点按刷新"
+        case .real: return "校园卡付款码，点按刷新"
+        case .connecting, .requesting: return "正在获取校园卡付款码"
+        case .unavailable: return "付款码暂不可用，点按重试"
+        }
     }
 
     private func refreshCode() {
-        if isLoggedIn {
-            requestRealBarcodeFromPhone()
-        } else {
-            applyDemoCode()
-        }
+        transientRetryCount = 0
+        credentialRefreshAttempted = false
+        phoneFallbackAttempted = false
+        requestSerial += 1
+        let serial = requestSerial
+        qrImage = nil
+        barcode = ""
+        codeState = .requesting
+        statusMessage = "正在获取付款码"
+        resolveCredentialAndFetch(serial: serial)
     }
 
-    private func applyDemoCode() {
-        isDemo = true
-        // 与 iPhone 未登录 mock 一致：16 位随机数字
-        barcode = (0 ..< 16).map { _ in String(Int.random(in: 0 ... 9)) }.joined()
-        qrImage = SimpleQRCode.image(from: barcode, size: 240)
-        statusMessage = "已刷新演示码"
+    private func applyBarcode(_ code: String, isDemo: Bool) {
+        barcode = code
+        qrImage = SimpleQRCode.image(from: code, size: 240)
+        if qrImage == nil {
+            setUnavailable("付款码过长\n请在 iPhone 打开")
+        } else {
+            codeState = isDemo ? .demo : .real
+            statusMessage = isDemo ? "已刷新演示码" : "已刷新付款码"
+            transientRetryCount = 0
+        }
         announceRefresh = true
     }
 
-    private func requestRealBarcodeFromPhone() {
+    private func setUnavailable(_ message: String) {
+        barcode = ""
+        qrImage = nil
+        codeState = .unavailable(message)
+        statusMessage = message.replacingOccurrences(of: "\n", with: "，")
+    }
+
+    private func resolveCredentialAndFetch(serial: Int) {
+        guard serial == requestSerial else { return }
+        if let credential = credentialStore.load(), !credential.needsRefresh {
+            fetchDirectlyFromWatch(credential: credential, serial: serial)
+            return
+        }
+        let needsRefresh = credentialStore.load()?.needsRefresh == true
+        if needsRefresh {
+            credentialRefreshAttempted = true
+        }
+        requestCredentialFromPhone(refresh: needsRefresh, serial: serial)
+    }
+
+    private func fetchDirectlyFromWatch(credential: WatchECardCredential, serial: Int) {
+        guard serial == requestSerial else { return }
+        codeState = .requesting
+        statusMessage = "正在通过 Watch 网络获取"
+        // Always fetch getCampusCards on Watch. Besides validating the account,
+        // this supplies the real balance without relying on WidgetKit timing.
+        ecardService.fetchPayCode(auth: credential.auth, cachedAccount: nil) { result in
+            DispatchQueue.main.async {
+                guard serial == self.requestSerial else { return }
+                switch result {
+                case let .success(payCode):
+                    var updated = credential
+                    updated.account = payCode.account
+                    updated.needsRefresh = false
+                    _ = self.credentialStore.save(updated)
+                    if let balance = payCode.balance {
+                        let defaults = WidgetAppGroup.defaults
+                        defaults?.set(balance, forKey: WidgetAppGroup.ecardBalanceKey)
+                        defaults?.set(Date(), forKey: WidgetAppGroup.ecardUpdateTimeKey)
+                        self.balanceText = ECardBalanceFormatter.string(from: balance)
+                        WidgetCenter.shared.reloadAllTimelines()
+                    }
+                    self.applyBarcode(payCode.code, isDemo: false)
+                case .failure(.authenticationExpired):
+                    self.credentialStore.markNeedsRefresh()
+                    guard !self.credentialRefreshAttempted else {
+                        self.setUnavailable("授权已失效\n请在 iPhone 重新登录")
+                        return
+                    }
+                    self.credentialRefreshAttempted = true
+                    self.requestCredentialFromPhone(refresh: true, serial: serial)
+                case .failure(.transientFailure):
+                    self.handleDirectTransientFailure(credential: credential, serial: serial)
+                case .failure(.invalidResponse), .failure(.noCards), .failure(.noBarcode):
+                    self.setUnavailable("服务返回异常\n点按重试")
+                }
+            }
+        }
+    }
+
+    private func handleDirectTransientFailure(credential: WatchECardCredential, serial: Int) {
+        guard transientRetryCount < 1 else {
+            requestBarcodeFromPhoneFallback(serial: serial, unavailableMessage: "网络请求失败\n点按重试")
+            return
+        }
+        transientRetryCount += 1
+        codeState = .requesting
+        statusMessage = "网络不稳定，正在重试"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            guard serial == self.requestSerial else { return }
+            self.fetchDirectlyFromWatch(credential: credential, serial: serial)
+        }
+    }
+
+    private func requestCredentialFromPhone(refresh: Bool, serial: Int) {
         guard WCSession.isSupported() else {
-            applyDemoCode()
-            statusMessage = "无法连接 iPhone，已显示演示码"
+            setCredentialUnavailable(refresh: refresh)
             return
         }
         let session = WCSession.default
-        guard session.activationState == .activated, session.isReachable else {
-            // 手机不可达：仍用演示码但标注
-            applyDemoCode()
-            statusMessage = "iPhone 未连接，已显示演示码"
+        guard session.activationState == .activated else {
+            // 表盘 deep link 会在 WCSession 完成冷启动前进入本页。
+            // 保留当前画面，由 activationDidComplete 通知触发自动重试。
+            codeState = .connecting
+            statusMessage = "正在连接 iPhone"
+            return
+        }
+        guard session.isReachable else {
+            setCredentialUnavailable(refresh: refresh)
             return
         }
 
-        isLoading = true
+        codeState = .requesting
+        statusMessage = refresh ? "正在通过 iPhone 更新授权" : "正在从 iPhone 配置授权"
         session.sendMessage(
-            ["action": "requestPayCode"],
+            ["action": refresh ? "refreshPayCredential" : "requestPayCredential"],
             replyHandler: { reply in
                 DispatchQueue.main.async {
-                    self.isLoading = false
-                    if let code = reply["barcode"] as? String, !code.isEmpty {
-                        let demo = (reply["isDemo"] as? Bool) ?? false
-                        self.isDemo = demo
-                        self.barcode = code
-                        self.qrImage = SimpleQRCode.image(from: code, size: 240)
-                        self.statusMessage = demo ? "已刷新演示码" : "已刷新付款码"
-                        self.announceRefresh = true
+                    guard serial == self.requestSerial else { return }
+                    if let credential = WatchECardCredentialMessage.credential(from: reply) {
+                        self.phoneFallbackAttempted = false
+                        switch WatchECardCredentialMessage.accept(credential) {
+                        case .success:
+                            self.fetchDirectlyFromWatch(credential: credential, serial: serial)
+                        case .failure(.passcodeRequired):
+                            // Independent storage is unavailable without a Watch
+                            // passcode, but the existing live iPhone fallback remains usable.
+                            self.requestBarcodeFromPhoneFallback(
+                                serial: serial,
+                                unavailableMessage: "请先为 Watch 设置密码"
+                            )
+                        case .failure:
+                            self.setUnavailable("无法安全保存授权\n点按重试")
+                        }
+                    } else if (reply["loggedIn"] as? Bool) == false {
+                        self.requestBarcodeFromPhoneFallback(
+                            serial: serial,
+                            unavailableMessage: "请在 iPhone 登录"
+                        )
+                    } else if refresh {
+                        self.setUnavailable("授权更新失败\n请在 iPhone 重新登录")
                     } else {
-                        self.applyDemoCode()
-                        self.statusMessage = "获取失败，已显示演示码"
+                        self.requestBarcodeFromPhoneFallback(
+                            serial: serial,
+                            unavailableMessage: "获取失败\n点按重试"
+                        )
                     }
                 }
             },
             errorHandler: { _ in
                 DispatchQueue.main.async {
-                    self.isLoading = false
-                    self.applyDemoCode()
-                    self.statusMessage = "获取失败，已显示演示码"
+                    guard serial == self.requestSerial else { return }
+                    if let credential = self.credentialStore.load(), !credential.needsRefresh {
+                        self.fetchDirectlyFromWatch(credential: credential, serial: serial)
+                    } else {
+                        self.setCredentialUnavailable(refresh: refresh)
+                    }
                 }
             }
         )
+    }
+
+    private func requestBarcodeFromPhoneFallback(serial: Int, unavailableMessage: String) {
+        guard !phoneFallbackAttempted else {
+            setUnavailable(unavailableMessage)
+            return
+        }
+        phoneFallbackAttempted = true
+        guard WCSession.isSupported() else {
+            setUnavailable(unavailableMessage)
+            return
+        }
+        let session = WCSession.default
+        guard session.activationState == .activated, session.isReachable else {
+            setUnavailable(unavailableMessage)
+            return
+        }
+        codeState = .requesting
+        statusMessage = "正在通过 iPhone 获取"
+        session.sendMessage(
+            ["action": "requestPayCode"],
+            replyHandler: { reply in
+                DispatchQueue.main.async {
+                    guard serial == self.requestSerial else { return }
+                    if let credential = WatchECardCredentialMessage.credential(from: reply) {
+                        _ = WatchECardCredentialMessage.accept(credential)
+                    }
+                    if let code = reply["barcode"] as? String, !code.isEmpty {
+                        self.applyBarcode(code, isDemo: (reply["isDemo"] as? Bool) ?? false)
+                    } else if (reply["needsRefresh"] as? Bool) == true,
+                              !self.credentialRefreshAttempted
+                    {
+                        self.credentialStore.markNeedsRefresh()
+                        self.credentialRefreshAttempted = true
+                        self.requestCredentialFromPhone(refresh: true, serial: serial)
+                    } else {
+                        self.setUnavailable(unavailableMessage)
+                    }
+                }
+            },
+            errorHandler: { _ in
+                DispatchQueue.main.async {
+                    guard serial == self.requestSerial else { return }
+                    self.setUnavailable(unavailableMessage)
+                }
+            }
+        )
+    }
+
+    private func setCredentialUnavailable(refresh: Bool) {
+        if refresh {
+            setUnavailable("授权已失效\n请连接 iPhone 刷新")
+        } else {
+            setUnavailable("尚未配置授权\n请连接 iPhone")
+        }
+    }
+
+    /// 表盘直达会让页面早于 WCSession 就绪；就绪后自动补请付款码。
+    private func retryBarcodeIfReady() {
+        guard codeState != .requesting, codeState != .real else { return }
+        if let credential = credentialStore.load(), !credential.needsRefresh {
+            refreshCode()
+            return
+        }
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        guard session.activationState == .activated, session.isReachable else { return }
+        refreshCode()
     }
 }
 
@@ -474,7 +713,7 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate, WCSessionDelegate
     func applicationDidFinishLaunching() {
         activateSession()
         #if DEBUG
-        seedPreviewDataIfNeeded()
+        removeLegacyPreviewDataIfNeeded()
         #endif
     }
 
@@ -486,34 +725,25 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate, WCSessionDelegate
     }
 
     #if DEBUG
-    private func seedPreviewDataIfNeeded() {
+    private func removeLegacyPreviewDataIfNeeded() {
         let defaults = WidgetAppGroup.defaults
-        guard defaults?.data(forKey: WidgetAppGroup.flowListKey) == nil else { return }
-        let now = Int64(Date().timeIntervalSince1970)
-        let sample: [PeriodDto?] = [
-            PeriodDto(
-                uid: "preview-1",
-                type: .classes,
-                name: "信号与系统",
-                startTime: now - 1800,
-                endTime: now + 2700,
-                location: "紫金港西1-216"
-            ),
-            PeriodDto(
-                uid: "preview-2",
-                type: .classes,
-                name: "数据结构",
-                startTime: now + 3600,
-                endTime: now + 7200,
-                location: "玉泉教7-202"
-            ),
-        ]
-        if let data = try? JSONEncoder().encode(sample) {
-            defaults?.set(data, forKey: WidgetAppGroup.flowListKey)
+        let migrationKey = "removedRuntimePreviewDataV1"
+        guard defaults?.bool(forKey: migrationKey) != true else { return }
+
+        // Earlier Debug builds wrote 18.97 and sample schedules into persistent
+        // App Group storage. Clear that one known synthetic value once so it
+        // cannot survive an upgrade and masquerade as a server response.
+        if defaults?.integer(forKey: WidgetAppGroup.ecardBalanceKey) == 1897 {
+            defaults?.removeObject(forKey: WidgetAppGroup.ecardBalanceKey)
+            defaults?.removeObject(forKey: WidgetAppGroup.ecardUpdateTimeKey)
         }
-        defaults?.set(1897, forKey: WidgetAppGroup.ecardBalanceKey)
-        defaults?.set(Date(), forKey: WidgetAppGroup.ecardUpdateTimeKey)
-        defaults?.set(false, forKey: WidgetAppGroup.ecardLoggedInKey)
+        if let data = defaults?.data(forKey: WidgetAppGroup.flowListKey),
+           let periods = try? JSONDecoder().decode([PeriodDto?].self, from: data),
+           periods.compactMap({ $0?.uid }).contains(where: { $0.hasPrefix("preview-") })
+        {
+            defaults?.removeObject(forKey: WidgetAppGroup.flowListKey)
+        }
+        defaults?.set(true, forKey: migrationKey)
         WidgetCenter.shared.reloadAllTimelines()
         WatchDataSync.notifyUpdated()
     }
@@ -526,6 +756,15 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate, WCSessionDelegate
     ) {
         if activationState == .activated {
             applyApplicationContext(session.receivedApplicationContext)
+            DispatchQueue.main.async {
+                WatchDataSync.notifyUpdated()
+            }
+        }
+    }
+
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        DispatchQueue.main.async {
+            WatchDataSync.notifyUpdated()
         }
     }
 
@@ -541,7 +780,7 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate, WCSessionDelegate
     }
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
-        applyApplicationContext(message)
+        handleMessage(message, replyHandler: nil)
     }
 
     func session(
@@ -549,8 +788,39 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate, WCSessionDelegate
         didReceiveMessage message: [String: Any],
         replyHandler: @escaping ([String: Any]) -> Void
     ) {
+        handleMessage(message, replyHandler: replyHandler)
+    }
+
+    private func handleMessage(
+        _ message: [String: Any],
+        replyHandler: (([String: Any]) -> Void)?
+    ) {
+        if let action = message["action"] as? String {
+            if action == WatchECardCredentialMessage.revokeAction {
+                WatchECardCredentialStore.shared.delete()
+                WidgetAppGroup.defaults?.set(false, forKey: WidgetAppGroup.ecardLoggedInKey)
+                DispatchQueue.main.async { WatchDataSync.notifyUpdated() }
+                replyHandler?(["ok": true])
+                return
+            }
+            if action == WatchECardCredentialMessage.provisionAction,
+               let credential = WatchECardCredentialMessage.credential(from: message)
+            {
+                switch WatchECardCredentialMessage.accept(credential) {
+                case .success:
+                    WidgetAppGroup.defaults?.set(true, forKey: WidgetAppGroup.ecardLoggedInKey)
+                    DispatchQueue.main.async { WatchDataSync.notifyUpdated() }
+                    replyHandler?(["ok": true])
+                case .failure(.passcodeRequired):
+                    replyHandler?(["ok": false, "error": "passcodeRequired"])
+                case .failure:
+                    replyHandler?(["ok": false, "error": "keychainFailure"])
+                }
+                return
+            }
+        }
         applyApplicationContext(message)
-        replyHandler(["ok": true])
+        replyHandler?(["ok": true])
     }
 
     private func applyApplicationContext(_ context: [String: Any]) {
@@ -579,8 +849,14 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate, WCSessionDelegate
 
         if let loggedIn = context["ecardLoggedIn"] as? Bool {
             defaults?.set(loggedIn, forKey: WidgetAppGroup.ecardLoggedInKey)
+            if !loggedIn {
+                WatchECardCredentialStore.shared.delete()
+            }
         } else if let loggedIn = context["ecardLoggedIn"] as? NSNumber {
             defaults?.set(loggedIn.boolValue, forKey: WidgetAppGroup.ecardLoggedInKey)
+            if !loggedIn.boolValue {
+                WatchECardCredentialStore.shared.delete()
+            }
         }
 
         WidgetCenter.shared.reloadAllTimelines()
