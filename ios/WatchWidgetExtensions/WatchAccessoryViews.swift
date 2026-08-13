@@ -8,7 +8,7 @@
 import SwiftUI
 import WidgetKit
 
-/// 入口型复杂功能：仅 Icon + 固定名称，不展示余额/课程详情
+/// 固定内容的入口型复杂功能。校园卡余额使用下方的专用视图。
 enum WatchAccessoryKind {
     case flow
     case ecard
@@ -149,6 +149,124 @@ struct WatchAccessoryView: View {
                     .widgetAccentable()
             }
             // watchOS 10+：让内容贴合角位弧线
+            .modifier(CornerCurvesIfAvailable())
+    }
+}
+
+/// 校园卡复杂功能：按不同表盘槽位显示真实缓存余额，并保留付款码入口语义。
+struct WatchECardAccessoryView: View {
+    @Environment(\.widgetFamily) private var family
+    @Environment(\.widgetRenderingMode) private var renderingMode
+
+    let balance: Int
+
+    private var fullBalance: String {
+        ECardBalanceFormatter.string(from: balance)
+    }
+
+    private var compactBalance: String {
+        ECardBalanceFormatter.compact(from: balance)
+    }
+
+    private var accessibilityText: String {
+        if balance < 0 {
+            return "校园卡余额待刷新，打开付款码"
+        }
+        return "校园卡余额\(fullBalance)，打开付款码"
+    }
+
+    var body: some View {
+        Group {
+            switch family {
+            case .accessoryCircular:
+                circularBody
+            case .accessoryRectangular:
+                rectangularBody
+            case .accessoryInline:
+                inlineBody
+            case .accessoryCorner:
+                cornerBody
+            default:
+                circularBody
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var circularBody: some View {
+        ZStack {
+            AccessoryWidgetBackground()
+            VStack(spacing: 0) {
+                Image(systemName: "qrcode")
+                    .font(.system(size: 12, weight: .semibold))
+                    .widgetAccentable()
+                Text(compactBalance)
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.55)
+            }
+            .padding(.horizontal, 3)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var rectangularBody: some View {
+        HStack(alignment: .center, spacing: 8) {
+            ZStack {
+                Circle()
+                    .fill(.tertiary.opacity(renderingMode == .fullColor ? 0.35 : 0.2))
+                Image(systemName: "qrcode")
+                    .font(.system(size: 16, weight: .semibold))
+                    .widgetAccentable()
+            }
+            .frame(width: 28, height: 28)
+            .layoutPriority(1)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text("校园卡余额")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(fullBalance)
+                    .font(.headline)
+                    .fontWeight(.semibold)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .padding(.vertical, 1)
+    }
+
+    private var inlineBody: some View {
+        Label {
+            Text(balance < 0 ? "校园卡余额待刷新" : "校园卡 \(fullBalance)")
+                .monospacedDigit()
+                .lineLimit(1)
+        } icon: {
+            Image(systemName: "qrcode")
+        }
+    }
+
+    private var cornerBody: some View {
+        Text(compactBalance)
+            .font(.system(size: 15, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.55)
+            .widgetAccentable()
+            .widgetLabel {
+                Label {
+                    Text("付款码")
+                } icon: {
+                    Image(systemName: "qrcode")
+                }
+                    .widgetAccentable()
+            }
             .modifier(CornerCurvesIfAvailable())
     }
 }

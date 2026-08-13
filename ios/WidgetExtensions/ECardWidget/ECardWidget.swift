@@ -15,11 +15,11 @@ struct ECardEntry: TimelineEntry {
 
 struct ECardWidgetProvider: TimelineProvider {
     func placeholder(in context: Context) -> ECardEntry {
-        ECardEntry(date: Date(), balance: 1897)
+        ECardEntry(date: Date(), balance: -1)
     }
     
     func getSnapshot(in context: Context, completion: @escaping (ECardEntry) -> Void) {
-        completion(ECardEntry(date: Date(), balance: 1897))
+        completion(ECardEntry(date: Date(), balance: -1))
     }
     
     func getTimeline(in context: Context, completion: @escaping (Timeline<Entry>) -> Void) {
@@ -58,54 +58,53 @@ struct ECardWidgetProvider: TimelineProvider {
             completion(Timeline(entries: [ECardEntry(date: Date(), balance: -1)], policy: .after(Date(timeIntervalSinceNow: 1800))))
             return
         } else if (value == "3200000000") {
-            // 如果是测试账号，直接显示18.97元
-            cacheBalance(1897)
-            completion(Timeline(entries: [ECardEntry(date: Date(), balance: 1897)], policy: .after(Date(timeIntervalSinceNow: 1800))))
+            // 测试账号没有真实余额，不能把样例金额写入运行时缓存。
+            cacheBalance(-1)
+            completion(Timeline(entries: [ECardEntry(date: Date(), balance: -1)], policy: .after(Date(timeIntervalSinceNow: 1800))))
             return
         }
         
-        var request = URLRequest(url: URL(string: "https://elife.zju.edu.cn/berserker-app/ykt/tsm/getCampusCards")!)
-        request.httpMethod = "GET"
-        request.addValue("Bearer " + value!, forHTTPHeaderField: "Synjones-Auth")
-        request.addValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0", forHTTPHeaderField: "User-Agent")
-
-        let semaphore = DispatchSemaphore(value: 0)
-        let sessionConfig = URLSessionConfiguration.default
-        sessionConfig.timeoutIntervalForRequest = 10
-        let sessionWithDelegate = URLSession(configuration: sessionConfig, delegate:nil , delegateQueue:nil )
-
-        var responseData : Data?
-        var responseError : Error?
-        sessionWithDelegate.dataTask(with: request) { (data, response, error) in
-            responseData=data
-            responseError=error
-            semaphore.signal()
-        }.resume()
-
-        semaphore.wait()
-
-        // Check for errors and process data or handle any errors
-        if responseError != nil {
-            return
-        } else if let data=responseData {
-            do {
-                if let jsonDict = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
-                    let data = jsonDict["data"] as? [String: Any]
-                    if(data == nil) { return }
-                    let cardList = data!["card"] as? [[String: Any]]
-                    if(cardList == nil) { return }
-                    let balanceList = cardList!.map { card in card["db_balance"] as! Int }
-                    let balance = balanceList.max()
-                    if(balance == nil) { return }
-                    cacheBalance(balance!)
-                    completion(Timeline(entries: [ECardEntry(date: Date(), balance: balance!)], policy: .after(Date(timeIntervalSinceNow: 1800))))
-                } else {
-                    return
-                }
-            } catch {
-                return
+        let cachedBalance = readCachedBalance()
+        let service = ECardService()
+        service.fetchCards(auth: value!) { result in
+            let balance: Int
+            let refreshInterval: TimeInterval
+            switch result {
+            case let .success(cards):
+                balance = cards.first?.balance ?? -1
+                refreshInterval = 1800
+                cacheBalance(balance)
+            case .failure(.authenticationExpired), .failure(.noCards):
+                // Match Watch's definition of an unusable credential/card, but
+                // never delete the shared iPhone Keychain item from an extension.
+                balance = -1
+                refreshInterval = 300
+                cacheBalance(-1)
+            case .failure(.transientFailure):
+                // A network outage is not credential expiry; retain the last
+                // known balance and ask WidgetKit to retry sooner.
+                balance = cachedBalance
+                refreshInterval = 300
+            case .failure(.invalidResponse), .failure(.noBarcode):
+                balance = cachedBalance
+                refreshInterval = 900
             }
+            completion(Timeline(
+                entries: [ECardEntry(date: Date(), balance: balance)],
+                policy: .after(Date(timeIntervalSinceNow: refreshInterval))
+            ))
         }
+    }
+
+    private func readCachedBalance() -> Int {
+        #if DEBUG
+        let suiteName = "group.top.celechron.celechron.debug"
+        #else
+        let suiteName = "group.top.celechron.celechron"
+        #endif
+        let defaults = UserDefaults(suiteName: suiteName)
+        guard defaults?.object(forKey: "ecardBalance") != nil else { return -1 }
+        return defaults?.integer(forKey: "ecardBalance") ?? -1
     }
 
     /// 缓存余额到 App Group，供 Apple Watch 经 iPhone 同步读取

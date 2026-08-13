@@ -72,7 +72,7 @@ enum WidgetAppGroup {
     static let ecardLoggedInKey = "ecardLoggedIn"
 }
 
-/// App Group / WatchConnectivity 写入后广播，手表页面 onReceive 刷新。
+/// App Group 数据或 WatchConnectivity 状态变化后广播，手表页面 onReceive 刷新。
 enum WatchDataSync {
     static let didUpdateNotification = Notification.Name("celechron.watchDataDidUpdate")
 
