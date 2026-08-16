@@ -10,13 +10,27 @@ import 'package:celechron/http/zjuServices/ecard.dart';
 import '../utils/utils.dart';
 
 class ECardWidgetMessenger {
-  static Future<void> update() async {
+  static const _platform = MethodChannel('top.celechron.celechron/ecardWidget');
+
+  /// Allows the iPhone companion to refresh a credential after Watch reports
+  /// an explicit authentication failure. This reuses the same CAS flow as the
+  /// iPhone ECardWidget instead of teaching native code a second login flow.
+  static void installNativeHandler() {
+    _platform.setMethodCallHandler((call) async {
+      if (call.method == 'refreshCredential') {
+        return await update(notifyNative: false);
+      }
+      throw MissingPluginException('Unsupported ECard method: ${call.method}');
+    });
+  }
+
+  static Future<bool> update({bool notifyNative = true}) async {
     var secureStorage = const FlutterSecureStorage();
     var username = await secureStorage.read(
         key: 'username', iOptions: secureStorageIOSOptions);
     var password = await secureStorage.read(
         key: 'password', iOptions: secureStorageIOSOptions);
-    if (username == null || password == null) return;
+    if (username == null || password == null) return false;
 
     // 如果是测试账号，则直接写入
     if (username == "3200000000") {
@@ -29,10 +43,10 @@ class ECardWidgetMessenger {
           value: "3200000000",
           iOptions: secureStorageIOSOptions);
 
-      if (Platform.isIOS || Platform.isAndroid) {
-        const platform = MethodChannel('top.celechron.celechron/ecardWidget');
-        await platform.invokeMethod('update');
+      if (notifyNative && (Platform.isIOS || Platform.isAndroid)) {
+        await _platform.invokeMethod('update');
       }
+      return true;
     }
 
     var httpClient = HttpClient();
@@ -55,12 +69,12 @@ class ECardWidgetMessenger {
           value: eCardAccount,
           iOptions: secureStorageIOSOptions);
 
-      if (PlatformFeatures.hasWidgetSupport) {
-        const platform = MethodChannel('top.celechron.celechron/ecardWidget');
-        await platform.invokeMethod('update');
+      if (notifyNative && PlatformFeatures.hasWidgetSupport) {
+        await _platform.invokeMethod('update');
       }
+      return true;
     } catch (e) {
-      return;
+      return false;
     } finally {
       httpClient.close(force: true);
     }
@@ -70,10 +84,11 @@ class ECardWidgetMessenger {
     var secureStorage = const FlutterSecureStorage();
     await secureStorage.delete(
         key: 'synjonesAuth', iOptions: secureStorageIOSOptions);
+    await secureStorage.delete(
+        key: 'eCardAccount', iOptions: secureStorageIOSOptions);
 
     if (PlatformFeatures.hasWidgetSupport) {
-      const platform = MethodChannel('top.celechron.celechron/ecardWidget');
-      await platform.invokeMethod('logout');
+      await _platform.invokeMethod('logout');
     }
   }
 }
