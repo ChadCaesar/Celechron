@@ -6,24 +6,6 @@
    <BuildAction
       parallelizeBuildables = "YES"
       buildImplicitDependencies = "YES">
-      <PreActions>
-         <ExecutionAction
-            ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
-            <ActionContent
-               title = "Run Prepare Flutter Framework Script"
-               scriptText = "/bin/sh &quot;$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh&quot; prepare&#10;">
-               <EnvironmentBuildable>
-                  <BuildableReference
-                     BuildableIdentifier = "primary"
-                     BlueprintIdentifier = "97C146ED1CF9000F007C117D"
-                     BuildableName = "Runner.app"
-                     BlueprintName = "Runner"
-                     ReferencedContainer = "container:Runner.xcodeproj">
-                  </BuildableReference>
-               </EnvironmentBuildable>
-            </ActionContent>
-         </ExecutionAction>
-      </PreActions>
       <BuildActionEntries>
          <BuildActionEntry
             buildForTesting = "YES"
@@ -33,9 +15,9 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "E052FFA22BE287E600031D98"
-               BuildableName = "WidgetExtensions.appex"
-               BlueprintName = "WidgetExtensions"
+               BlueprintIdentifier = "A10000000000000000000071"
+               BuildableName = "WatchWidgetExtensions.appex"
+               BlueprintName = "WatchWidgetExtensions"
                ReferencedContainer = "container:Runner.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -47,9 +29,9 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "97C146ED1CF9000F007C117D"
-               BuildableName = "Runner.app"
-               BlueprintName = "Runner"
+               BlueprintIdentifier = "A10000000000000000000070"
+               BuildableName = "CelechronWatch.app"
+               BlueprintName = "CelechronWatch"
                ReferencedContainer = "container:Runner.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -64,9 +46,9 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "97C146ED1CF9000F007C117D"
-            BuildableName = "Runner.app"
-            BlueprintName = "Runner"
+            BlueprintIdentifier = "A10000000000000000000070"
+            BuildableName = "CelechronWatch.app"
+            BlueprintName = "CelechronWatch"
             ReferencedContainer = "container:Runner.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
@@ -83,23 +65,22 @@
       debugServiceExtension = "internal"
       allowLocationSimulation = "YES"
       launchAutomaticallySubstyle = "2">
-      <RemoteRunnable
-         runnableDebuggingMode = "2"
-         BundleIdentifier = "com.apple.springboard">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "E052FFA22BE287E600031D98"
-            BuildableName = "WidgetExtensions.appex"
-            BlueprintName = "WidgetExtensions"
+            BlueprintIdentifier = "A10000000000000000000071"
+            BuildableName = "WatchWidgetExtensions.appex"
+            BlueprintName = "WatchWidgetExtensions"
             ReferencedContainer = "container:Runner.xcodeproj">
          </BuildableReference>
-      </RemoteRunnable>
+      </BuildableProductRunnable>
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "97C146ED1CF9000F007C117D"
-            BuildableName = "Runner.app"
-            BlueprintName = "Runner"
+            BlueprintIdentifier = "A10000000000000000000070"
+            BuildableName = "CelechronWatch.app"
+            BlueprintName = "CelechronWatch"
             ReferencedContainer = "container:Runner.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
@@ -116,7 +97,7 @@
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "_XCWidgetFamily"
-            value = "systemMedium"
+            value = "accessoryCircular"
             isEnabled = "YES">
          </EnvironmentVariable>
       </EnvironmentVariables>
@@ -129,17 +110,16 @@
       debugDocumentVersioning = "YES"
       askForAppToLaunch = "Yes"
       launchAutomaticallySubstyle = "2">
-      <RemoteRunnable
-         runnableDebuggingMode = "2"
-         BundleIdentifier = "com.apple.springboard">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "E052FFA22BE287E600031D98"
-            BuildableName = "WidgetExtensions.appex"
-            BlueprintName = "WidgetExtensions"
+            BlueprintIdentifier = "A10000000000000000000071"
+            BuildableName = "WatchWidgetExtensions.appex"
+            BlueprintName = "WatchWidgetExtensions"
             ReferencedContainer = "container:Runner.xcodeproj">
          </BuildableReference>
-      </RemoteRunnable>
+      </BuildableProductRunnable>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">

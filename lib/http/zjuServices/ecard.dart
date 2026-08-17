@@ -83,6 +83,9 @@ class ECard {
         await readResponseText(response, context: '校园卡账户接口', expectJson: true);
     final payload = decodeJsonMap(accountJson,
         context: '校园卡账户接口；HTTP ${response.statusCode}');
+    if (jsonIndicatesAuthenticationFailure(payload)) {
+      throw AuthenticationExpiredException('校园卡账户接口：登录态已失效');
+    }
     final data = asStringMap(payload['data']);
     final cardList = asDynamicList(data?['card']) ?? const [];
     // Card list is a List<Map<String, dynamic>> object, which may contain multiple cards.
@@ -122,6 +125,9 @@ class ECard {
         await readResponseText(response, context: '校园卡付款码接口', expectJson: true);
     final payload = decodeJsonMap(barcodeJson,
         context: '校园卡付款码接口；HTTP ${response.statusCode}');
+    if (jsonIndicatesAuthenticationFailure(payload)) {
+      throw AuthenticationExpiredException('校园卡付款码接口：登录态已失效');
+    }
     final data = asStringMap(payload['data']);
     final barcodes = asDynamicList(data?['barcode']) ?? const [];
     final barcode = barcodes.isEmpty ? null : asString(barcodes.first);
